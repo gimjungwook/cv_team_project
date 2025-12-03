@@ -1,310 +1,292 @@
-import tkinter as tk
-from tkinter import filedialog, messagebox
+"""
+Object Detector & Eraser - 간소화된 OpenCV 기반 버전
+
+키보드 단축키:
+    d: YOLO 탐지 실행
+    r: ROI 수동 추가 (드래그)
+    e: 선택 영역 제거
+    t: Telea 직접 구현 모드
+    c: cv2.inpaint() 모드
+    l: LaMa 모드
+    s: 결과 저장
+    z: 원본 복원
+    q: 종료
+"""
+
+import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Tuple, Optional
 
 import cv2
 import numpy as np
 
-from core.detect import load_default_detector, YOLODetector
-from core.state import AppState
-from ui.canvas import ImageCanvas
-from ui.controls import ControlPanel
+from core.detect import load_default_detector, YOLODetector, DetectionResult
+from core.lama import load_lama_model, LamaInpainter
+from core.inpaint import telea_inpaint
 
 
-MAX_IMAGE_SIZE: Tuple[int, int] = (1920, 1080)
-MAX_DISPLAY_SIZE: Tuple[int, int] = (1200, 900)
-MAX_OBJECT_AREA_RATIO: float = 0.30  # per PRD limitation
+class ObjectEraser:
+    """OpenCV 기반 객체 제거 애플리케이션"""
 
+    def __init__(self, image_path: str):
+        self.original = cv2.imread(image_path)
+        if self.original is None:
+            raise ValueError(f"이미지를 불러올 수 없습니다: {image_path}")
 
-def _read_image(path: Path) -> np.ndarray:
-    image = cv2.imread(str(path))
-    if image is None:
-        raise ValueError(f"Could not read image: {path}")
-    return image
-
-
-def _resize_if_needed(image_bgr: np.ndarray, max_size: Tuple[int, int]) -> Tuple[np.ndarray, float]:
-    """Downscale the working image if it exceeds max_size."""
-    h, w = image_bgr.shape[:2]
-    max_w, max_h = max_size
-    scale = min(max_w / w, max_h / h, 1.0)
-    if scale < 1.0:
-        new_size = (int(w * scale), int(h * scale))
-        resized = cv2.resize(image_bgr, new_size, interpolation=cv2.INTER_AREA)
-        return resized, scale
-    return image_bgr, 1.0
-
-
-class App:
-    def __init__(self):
-        self.root = tk.Tk()
-        self.root.title("Object Eraser (CV Project)")
-        self.state = AppState()
+        self.result = self.original.copy()
+        self.mode = "telea"  # "telea", "telea_cv", "lama"
+        self.detections: List[DetectionResult] = []
+        self.rois: List[Tuple[int, int, int, int]] = []
         self.detector: Optional[YOLODetector] = None
-        self.roi_drawing = False
-        self._drag_start: tuple[int, int] | None = None
-
-        # Layout: left canvas, right controls
-        left_frame = tk.Frame(self.root, padx=6, pady=6)
-        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.canvas = ImageCanvas(left_frame)
-
-        self.controls = ControlPanel(
-            parent=self.root,
-            on_open=self.open_image,
-            on_save=self.save_image,
-            on_detect=self.run_detection,
-            on_add_roi=self.add_manual_roi,
-            on_erase=self.erase_selected,
-            on_mode_change=self.change_mode,
-            on_selection_change=self.on_selection_change,
-        )
-        canvas_widget = self.canvas.widget()
-        canvas_widget.bind("<ButtonPress-1>", self.on_canvas_press)
-        canvas_widget.bind("<B1-Motion>", self.on_canvas_drag)
-        canvas_widget.bind("<ButtonRelease-1>", self.on_canvas_release)
-
-    def open_image(self) -> None:
-        file_path = filedialog.askopenfilename(
-            filetypes=[("Images", "*.jpg;*.jpeg;*.png;*.bmp"), ("All files", "*.*")]
-        )
-        if not file_path:
-            return
-        try:
-            image_bgr = _read_image(Path(file_path))
-            image_bgr, _ = _resize_if_needed(image_bgr, MAX_IMAGE_SIZE)
-            self.state.set_image(image_bgr, Path(file_path), MAX_DISPLAY_SIZE)
-            self.canvas.render_image(self.state)
-            self.canvas.draw_overlays(self.state)
-            self._update_items_view()
-            self.set_status(f"Loaded: {Path(file_path).name}")
-        except Exception as exc:  # pylint: disable=broad-except
-            messagebox.showerror("Error", str(exc))
-            self.set_status("Failed to load image")
-
-    def save_image(self) -> None:
-        if not self.state.has_image():
-            messagebox.showinfo("Info", "Load an image first.")
-            return
-        save_path = filedialog.asksaveasfilename(
-            defaultextension=".png",
-            filetypes=[("PNG", "*.png"), ("JPEG", "*.jpg;*.jpeg"), ("Bitmap", "*.bmp")],
-        )
-        if not save_path:
-            return
-        try:
-            cv2.imwrite(save_path, self.state.image_bgr)
-            self.set_status(f"Saved to {Path(save_path).name}")
-        except Exception as exc:  # pylint: disable=broad-except
-            messagebox.showerror("Error", f"Save failed: {exc}")
-            self.set_status("Save failed")
-
-    def change_mode(self, mode: str) -> None:
-        self.state.mode = mode
-        self.set_status(f"Mode changed to {mode}")
-
-    def run_detection(self) -> None:
-        if not self.state.has_image():
-            messagebox.showinfo("Info", "Load an image first.")
-            return
-        try:
-            if self.detector is None:
-                self.detector = load_default_detector(Path("models"))
-            raw_detections = self.detector.detect(self.state.image_bgr)
-            self.state.detections = self._filter_large_detections(raw_detections)
-            manual_selection = {key for key in self.state.selected_items if key.startswith("roi:")}
-            detection_selection = {f"det:{i}" for i in range(len(self.state.detections))}
-            self.state.selected_items = manual_selection | detection_selection
-            skipped = len(raw_detections) - len(self.state.detections)
-            if skipped > 0:
-                self.set_status(f"Detections: {len(self.state.detections)} (skipped {skipped} >30% area)")
-            else:
-                self.set_status(f"Detections: {len(self.state.detections)}")
-            self.canvas.draw_overlays(self.state)
-            self._update_items_view()
-        except FileNotFoundError as exc:
-            messagebox.showerror("Model missing", str(exc))
-            self.set_status("Detector not ready")
-        except Exception as exc:  # pylint: disable=broad-except
-            messagebox.showerror("Error", f"Detection failed: {exc}")
-            self.set_status("Detection failed")
-
-    def add_manual_roi(self) -> None:
-        if not self.state.has_image():
-            messagebox.showinfo("Info", "Load an image first.")
-            return
-        self.roi_drawing = True
-        self.set_status("Drag on the image to add ROI")
-
-    def erase_selected(self) -> None:
-        if not self.state.has_image():
-            messagebox.showinfo("Info", "Load an image first.")
-            return
-        selections = self.state.selected_items
-        if not selections:
-            messagebox.showinfo("Info", "Select detections or ROIs to erase.")
-            return
-        try:
-            boxes = self._collect_selected_boxes()
-            if not boxes:
-                messagebox.showinfo("Info", "Nothing to erase. Run detection or add an ROI.")
-                return
-            if self.state.mode == "lama":
-                messagebox.showinfo("Info", "Lama 모드는 아직 연결되지 않아 Class 파이프라인으로 진행합니다.")
-            updated = self._erase_with_grabcut_and_blur(boxes)
-            self._update_image(updated)
-            self.set_status("Erased selected areas")
-        except Exception as exc:  # pylint: disable=broad-except
-            messagebox.showerror("Error", f"Erase failed: {exc}")
-            self.set_status("Erase failed")
-
-    def set_status(self, text: str) -> None:
-        self.state.status = text
-        self.controls.set_status(text)
-
-    def on_selection_change(self) -> None:
-        items = self._item_catalog()
-        selected_indices = list(self.controls.listbox.curselection())
-        new_selection = set()
-        for idx in selected_indices:
-            key = items[idx][0]
-            new_selection.add(key)
-        self.state.selected_items = new_selection
-        self.canvas.draw_overlays(self.state)
-
-    def on_canvas_press(self, event) -> None:  # type: ignore[override]
-        if not self.roi_drawing or not self.state.has_image():
-            return
-        self._drag_start = (event.x, event.y)
-
-    def on_canvas_drag(self, event) -> None:  # type: ignore[override]
-        if not self.roi_drawing or self._drag_start is None:
-            return
-        x0, y0 = self._drag_start
-        self.canvas.show_active_roi(x0, y0, event.x, event.y)
-
-    def on_canvas_release(self, event) -> None:  # type: ignore[override]
-        if not self.roi_drawing or self._drag_start is None:
-            return
-        x0, y0 = self._drag_start
-        x1, y1 = event.x, event.y
-        self.roi_drawing = False
-        self._drag_start = None
-        self.canvas.clear_active_roi()
-
-        x_min, x_max = sorted([x0, x1])
-        y_min, y_max = sorted([y0, y1])
-        ix0, iy0 = self.state.display_to_image(x_min, y_min)
-        ix1, iy1 = self.state.display_to_image(x_max, y_max)
-        w = max(ix1 - ix0, 1)
-        h = max(iy1 - iy0, 1)
-        if w < 5 or h < 5:
-            self.set_status("ROI too small, ignored")
-            return
-        if self._is_bbox_too_big((ix0, iy0, w, h)):
-            messagebox.showinfo("Info", "선택 영역이 이미지의 30%를 초과하여 무시되었습니다.")
-            self.set_status("ROI too large (>30%), ignored")
-            return
-        self.state.manual_rois.append((ix0, iy0, w, h))
-        key = f"roi:{len(self.state.manual_rois) - 1}"
-        self.state.selected_items.add(key)
-        self.canvas.draw_overlays(self.state)
-        self._update_items_view()
-        self.set_status(f"Added ROI #{len(self.state.manual_rois)}")
-
-    def _item_catalog(self) -> List[tuple[str, str]]:
-        """Return list of (key, label) pairs in the order shown in the UI."""
-        items: List[tuple[str, str]] = []
-        for idx, det in enumerate(self.state.detections):
-            label = f"{det.label} {det.confidence * 100:.0f}%"
-            items.append((f"det:{idx}", label))
-        for idx, _roi in enumerate(self.state.manual_rois):
-            items.append((f"roi:{idx}", f"Manual ROI #{idx + 1}"))
-        return items
-
-    def _update_items_view(self) -> None:
-        catalog = self._item_catalog()
-        labels = [label for _key, label in catalog]
-        selected_indices = [
-            idx for idx, (key, _label) in enumerate(catalog) if key in self.state.selected_items
-        ]
-        self.controls.set_items(labels, selected_indices)
-
-    def _collect_selected_boxes(self) -> List[tuple[int, int, int, int]]:
-        boxes: List[tuple[int, int, int, int]] = []
-        for key in self.state.selected_items:
-            if key.startswith("det:"):
-                idx = int(key.split(":")[1])
-                if 0 <= idx < len(self.state.detections):
-                    boxes.append(self.state.detections[idx].bbox)
-            elif key.startswith("roi:"):
-                idx = int(key.split(":")[1])
-                if 0 <= idx < len(self.state.manual_rois):
-                    boxes.append(self.state.manual_rois[idx])
-        return boxes
-
-    def _erase_with_grabcut_and_blur(self, boxes: List[tuple[int, int, int, int]]) -> np.ndarray:
-        """Class-mode erase: GrabCut on selected boxes, then blend with blurred background."""
-        assert self.state.image_bgr is not None
-        image = self.state.image_bgr
-        h, w = image.shape[:2]
-        accumulated_mask = np.zeros((h, w), dtype=np.uint8)
-        kernel = np.ones((3, 3), np.uint8)
-
-        for x, y, bw, bh in boxes:
-            x1, y1 = max(x, 0), max(y, 0)
-            x2, y2 = min(x + bw, w - 1), min(y + bh, h - 1)
-            if x2 <= x1 + 1 or y2 <= y1 + 1:
-                continue
-            mask = np.zeros((h, w), dtype=np.uint8)
-            bgd_model = np.zeros((1, 65), np.float64)
-            fgd_model = np.zeros((1, 65), np.float64)
-            cv2.grabCut(image, mask, (x1, y1, x2 - x1, y2 - y1), bgd_model, fgd_model, 3, cv2.GC_INIT_WITH_RECT)
-            fg = np.where((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 255, 0).astype(np.uint8)
-            accumulated_mask = cv2.bitwise_or(accumulated_mask, fg)
-
-        if not np.any(accumulated_mask):
-            raise ValueError("GrabCut failed to produce a mask; adjust selection or ROI.")
-
-        dilated_mask = cv2.dilate(accumulated_mask, kernel, iterations=1)
-
-        if self.state.mode == "lama":
-            # TODO: Lama 모델 연결 시 이 분기에서 마스크를 사용해 인페인팅을 대체.
-            pass
-
-        blurred = cv2.GaussianBlur(image, (21, 21), 0)
-        result = image.copy()
-        result[dilated_mask > 0] = blurred[dilated_mask > 0]
-        return result
-
-    def _filter_large_detections(self, detections: List["DetectionResult"]) -> List["DetectionResult"]:
-        max_area = self._max_allowed_area()
-        filtered: List["DetectionResult"] = []
-        for det in detections:
-            x, y, w, h = det.bbox
-            if w * h <= max_area:
-                filtered.append(det)
-        return filtered
-
-    def _max_allowed_area(self) -> float:
-        img_w, img_h = self.state.image_size()
-        return img_w * img_h * MAX_OBJECT_AREA_RATIO
-
-    def _is_bbox_too_big(self, bbox: tuple[int, int, int, int]) -> bool:
-        _x, _y, w, h = bbox
-        return w * h > self._max_allowed_area()
-
-    def _update_image(self, new_bgr: np.ndarray) -> None:
-        """Replace image and refresh display/overlays."""
-        self.state.set_image(new_bgr, self.state.image_path, MAX_DISPLAY_SIZE)
-        self.canvas.render_image(self.state)
-        self.canvas.draw_overlays(self.state)
-        self._update_items_view()
+        self.lama: Optional[LamaInpainter] = None
+        self.window_name = "Object Eraser (d:탐지 r:ROI e:제거 t/c/l:모드 s:저장 q:종료)"
 
     def run(self) -> None:
-        self.root.mainloop()
+        """메인 루프"""
+        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+
+        while True:
+            self._show_image()
+            key = cv2.waitKey(0) & 0xFF
+
+            if key == ord('q'):
+                break
+            elif key == ord('d'):
+                self._detect()
+            elif key == ord('r'):
+                self._add_roi()
+            elif key == ord('e'):
+                self._erase()
+            elif key == ord('t'):
+                self.mode = "telea"
+                print("모드 변경: Telea 직접 구현 → 'e' 키로 제거 실행")
+            elif key == ord('c'):
+                self.mode = "telea_cv"
+                print("모드 변경: cv2.inpaint() → 'e' 키로 제거 실행")
+            elif key == ord('l'):
+                self.mode = "lama"
+                print("모드 변경: LaMa → 'e' 키로 제거 실행")
+            elif key == ord('s'):
+                self._save()
+            elif key == ord('z'):
+                self.result = self.original.copy()
+                self.detections = []
+                self.rois = []
+                print("원본으로 복원됨")
+
+        cv2.destroyAllWindows()
+
+    def _show_image(self) -> None:
+        """Before | After 나란히 표시 + 조작법"""
+        h, w = self.original.shape[:2]
+
+        # 탐지 결과와 ROI를 원본 이미지에 표시
+        display_original = self.original.copy()
+        self._draw_overlays(display_original)
+
+        # 나란히 배치
+        combined = np.hstack([display_original, self.result])
+
+        # 조작법 패널 (오른쪽 상단)
+        panel_x = w + 30
+        line_h = 55
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 1.2
+        thick = 3
+
+        # 현재 모드 (크게)
+        mode_text = {"telea": "Telea (직접구현)", "telea_cv": "cv2.inpaint()", "lama": "LaMa (딥러닝)"}
+        cv2.putText(combined, f"[Mode] {mode_text.get(self.mode, self.mode)}",
+                    (panel_x, 50), font, 1.5, (0, 255, 0), 3)
+
+        # 탐지/ROI 개수
+        cv2.putText(combined, f"Detections: {len(self.detections)} | ROIs: {len(self.rois)}",
+                    (panel_x, 110), font, 1.2, (0, 255, 255), 3)
+
+        # 조작법 안내
+        controls = [
+            ("=== Controls ===", (255, 255, 255)),
+            ("d: YOLO Detect", (100, 255, 100)),
+            ("r: Add ROI", (100, 255, 100)),
+            ("e: ERASE!", (100, 100, 255)),
+            ("=== Mode ===", (255, 255, 255)),
+            ("t: Telea", (200, 200, 100)),
+            ("c: cv2.inpaint", (200, 200, 100)),
+            ("l: LaMa", (200, 200, 100)),
+            ("=== Other ===", (255, 255, 255)),
+            ("s: Save", (200, 200, 200)),
+            ("z: Reset", (200, 200, 200)),
+            ("q: Quit", (200, 200, 200)),
+        ]
+
+        y = 180
+        for text, color in controls:
+            cv2.putText(combined, text, (panel_x, y), font, font_scale, color, thick)
+            y += line_h
+
+        # 라벨 (하단)
+        cv2.putText(combined, "[ Original ]", (w // 2 - 100, h - 30),
+                    font, 1.3, (255, 255, 255), 3)
+        cv2.putText(combined, "[ Result ]", (w + w // 2 - 80, h - 30),
+                    font, 1.3, (255, 255, 255), 3)
+
+        cv2.imshow(self.window_name, combined)
+
+    def _draw_overlays(self, image: np.ndarray) -> None:
+        """탐지 결과와 ROI 박스 그리기"""
+        # 탐지 결과
+        for det in self.detections:
+            x, y, w, h = det.bbox
+            cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            label = f"{det.label} {det.confidence * 100:.0f}%"
+            cv2.putText(image, label, (x, y - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+        # 수동 ROI
+        for i, roi in enumerate(self.rois):
+            x, y, w, h = roi
+            cv2.rectangle(image, (x, y), (x + w, y + h), (0, 165, 255), 2)
+            cv2.putText(image, f"ROI {i + 1}", (x, y - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2)
+
+    def _detect(self) -> None:
+        """YOLO 탐지"""
+        try:
+            if self.detector is None:
+                print("YOLO 모델 로딩 중...")
+                self.detector = load_default_detector(Path("models"))
+
+            print("객체 탐지 중...")
+            self.detections = self.detector.detect(self.original)
+            print(f"탐지 완료: {len(self.detections)}개 객체 발견")
+        except FileNotFoundError as e:
+            print(f"오류: {e}")
+        except Exception as e:
+            print(f"탐지 실패: {e}")
+
+    def _add_roi(self) -> None:
+        """cv2.selectROI로 ROI 추가"""
+        print("ROI 선택: 마우스로 드래그 후 Enter/Space, 취소는 c")
+        roi = cv2.selectROI("Select ROI", self.original, fromCenter=False, showCrosshair=True)
+        cv2.destroyWindow("Select ROI")
+
+        x, y, w, h = roi
+        if w > 0 and h > 0:
+            self.rois.append((x, y, w, h))
+            print(f"ROI 추가됨: ({x}, {y}, {w}, {h})")
+        else:
+            print("ROI 선택 취소됨")
+
+    def _create_mask(self) -> np.ndarray:
+        """GrabCut으로 마스크 생성"""
+        h, w = self.original.shape[:2]
+        mask = np.zeros((h, w), dtype=np.uint8)
+
+        boxes = [(d.bbox[0], d.bbox[1], d.bbox[2], d.bbox[3]) for d in self.detections]
+        boxes.extend(self.rois)
+
+        for bx, by, bw, bh in boxes:
+            # 경계 보정
+            x1 = max(bx, 0)
+            y1 = max(by, 0)
+            x2 = min(bx + bw, w - 1)
+            y2 = min(by + bh, h - 1)
+
+            if x2 - x1 < 10 or y2 - y1 < 10:
+                mask[y1:y2, x1:x2] = 255
+                continue
+
+            # GrabCut 시도
+            try:
+                gc_mask = np.zeros((h, w), dtype=np.uint8)
+                bgd = np.zeros((1, 65), np.float64)
+                fgd = np.zeros((1, 65), np.float64)
+                cv2.grabCut(self.original, gc_mask, (x1, y1, x2 - x1, y2 - y1),
+                            bgd, fgd, 3, cv2.GC_INIT_WITH_RECT)
+                fg = np.where((gc_mask == cv2.GC_FGD) | (gc_mask == cv2.GC_PR_FGD), 255, 0).astype(np.uint8)
+                if np.any(fg):
+                    mask = cv2.bitwise_or(mask, fg)
+                else:
+                    mask[y1:y2, x1:x2] = 255
+            except cv2.error:
+                mask[y1:y2, x1:x2] = 255
+
+        # 마스크 확장
+        kernel = np.ones((5, 5), np.uint8)
+        mask = cv2.dilate(mask, kernel, iterations=2)
+        return mask
+
+    def _erase(self) -> None:
+        """선택된 영역 제거"""
+        if not self.detections and not self.rois:
+            print("제거할 영역이 없습니다. 'd'로 탐지하거나 'r'로 ROI를 추가하세요.")
+            return
+
+        print(f"마스크 생성 중... ({len(self.detections)}개 탐지 + {len(self.rois)}개 ROI)")
+        mask = self._create_mask()
+
+        if not np.any(mask):
+            print("마스크가 비어있습니다.")
+            return
+
+        try:
+            if self.mode == "telea":
+                print("Telea 인페인팅 처리 중 (직접 구현)...")
+                self.result = telea_inpaint(self.result, mask, inpaint_radius=5)
+            elif self.mode == "telea_cv":
+                print("cv2.inpaint() 처리 중...")
+                self.result = cv2.inpaint(self.result, mask, 5, cv2.INPAINT_TELEA)
+            elif self.mode == "lama":
+                if self.lama is None:
+                    print("LaMa 모델 로딩 중...")
+                    self.lama = load_lama_model(Path("models"))
+                    if self.lama is None:
+                        print("LaMa 모델을 찾을 수 없습니다. models/lama/lama_fp32.onnx 필요")
+                        return
+                print("LaMa 인페인팅 처리 중...")
+                self.result = self.lama.inpaint(self.result, mask)
+
+            print("제거 완료!")
+            # 처리 후 탐지/ROI 초기화
+            self.detections = []
+            self.rois = []
+        except Exception as e:
+            print(f"제거 실패: {e}")
+
+    def _save(self) -> None:
+        """결과 저장"""
+        output_path = "result.png"
+        cv2.imwrite(output_path, self.result)
+        print(f"저장됨: {output_path}")
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("사용법: python app.py <이미지 경로>")
+        print("예: python app.py image.jpg")
+        sys.exit(1)
+
+    image_path = sys.argv[1]
+    if not Path(image_path).exists():
+        print(f"파일을 찾을 수 없습니다: {image_path}")
+        sys.exit(1)
+
+    print(f"이미지 로드: {image_path}")
+    print("\n=== 키보드 단축키 ===")
+    print("d: YOLO 탐지")
+    print("r: ROI 수동 추가")
+    print("e: 선택 영역 제거")
+    print("t: Telea 직접 구현 모드")
+    print("c: cv2.inpaint() 모드")
+    print("l: LaMa 모드")
+    print("s: 결과 저장")
+    print("z: 원본 복원")
+    print("q: 종료")
+    print("=====================\n")
+
+    app = ObjectEraser(image_path)
+    app.run()
 
 
 if __name__ == "__main__":
-    App().run()
+    main()

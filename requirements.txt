@@ -1,7 +1,4 @@
-opencv-python
-numpy
-Pillow # Used for image processing, especially with Tkinter
-# For Lama model inference, choose one of the following:
-# torch # PyTorch backend (requires specific CUDA/CPU version based on your system)
-onnxruntime # ONNX backend (generally easier to set up for inference)
-# ultralytics # Optional: for advanced YOLO models (e.g., YOLOv5, YOLOv8) if used instead of OpenCV DNN's YOLOv2
+# opencv-python  # macOS 26+ 사용 시 brew install opencv 사용
+numpy<2
+Pillow
+onnxruntime

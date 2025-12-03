@@ -1,10 +1,17 @@
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Sequence
+from typing import List, Tuple
 
 import cv2
 import numpy as np
 
-from core.state import DetectionResult
+
+@dataclass
+class DetectionResult:
+    """YOLO 탐지 결과"""
+    label: str
+    confidence: float
+    bbox: Tuple[int, int, int, int]  # x, y, w, h
 
 
 def _load_names(names_path: Path) -> List[str]:
