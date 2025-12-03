@@ -28,6 +28,9 @@ from core.inpaint import telea_inpaint
 class ObjectEraser:
     """OpenCV 기반 객체 제거 애플리케이션"""
 
+    MAX_WINDOW_WIDTH = 1600  # 최대 윈도우 너비
+    MAX_WINDOW_HEIGHT = 900  # 최대 윈도우 높이
+
     def __init__(self, image_path: str):
         self.original = cv2.imread(image_path)
         if self.original is None:
@@ -44,6 +47,7 @@ class ObjectEraser:
     def run(self) -> None:
         """메인 루프"""
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(self.window_name, self.MAX_WINDOW_WIDTH, self.MAX_WINDOW_HEIGHT)
 
         while True:
             self._show_image()
