@@ -29,77 +29,22 @@ class LamaInpainter:
         providers = ort.get_available_providers()
         self.session = ort.InferenceSession(str(model_path), providers=providers)
 
-        # 입력 이름 확인 및 저장
-        self.input_names = {inp.name: inp for inp in self.session.get_inputs()}
-        print(f"[LaMa] 모델 입력: {list(self.input_names.keys())}")
-
     def inpaint(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
-        """이미지 인페인팅 - 마스크 영역만 크롭하여 고품질 처리"""
+        """이미지 인페인팅 (전체 이미지를 512x512로 축소)"""
         orig_h, orig_w = image.shape[:2]
 
-        # 마스크 영역의 바운딩 박스 찾기
-        crop_box = self._get_mask_bbox(mask, padding=50)
+        # 전처리
+        img_input, mask_input, pad_info = self._preprocess(image, mask)
 
-        if crop_box is None:
-            return image  # 마스크가 비어있으면 원본 반환
-
-        x1, y1, x2, y2 = crop_box
-        crop_w, crop_h = x2 - x1, y2 - y1
-
-        # 마스크 영역 크롭
-        cropped_image = image[y1:y2, x1:x2].copy()
-        cropped_mask = mask[y1:y2, x1:x2].copy()
-
-        print(f"[LaMa] 원본: {orig_w}x{orig_h}, 크롭 영역: {crop_w}x{crop_h}")
-
-        # 전처리 (크롭된 영역만)
-        img_input, mask_input, pad_info = self._preprocess(cropped_image, cropped_mask)
-
-        # 추론
+        # 추론 - 명시적 입력 이름 사용
         output = self.session.run(None, {
             "image": img_input,
             "mask": mask_input
         })[0]
 
-        # 후처리 (크롭된 크기로 복원)
-        inpainted_crop = self._postprocess(output, crop_h, crop_w, pad_info)
-
-        # 원본 이미지에 결과 붙이기
-        result = image.copy()
-        result[y1:y2, x1:x2] = inpainted_crop
-
+        # 후처리
+        result = self._postprocess(output, orig_h, orig_w, pad_info)
         return result
-
-    def _get_mask_bbox(self, mask: np.ndarray, padding: int = 50) -> Optional[Tuple[int, int, int, int]]:
-        """마스크의 바운딩 박스 찾기 (패딩 포함)"""
-        h, w = mask.shape[:2]
-
-        # 마스크가 있는 픽셀 좌표 찾기
-        coords = np.where(mask > 0)
-        if len(coords[0]) == 0:
-            return None
-
-        y_min, y_max = coords[0].min(), coords[0].max()
-        x_min, x_max = coords[1].min(), coords[1].max()
-
-        # 패딩 추가 (경계 체크)
-        x1 = max(0, x_min - padding)
-        y1 = max(0, y_min - padding)
-        x2 = min(w, x_max + padding)
-        y2 = min(h, y_max + padding)
-
-        # 최소 크기 보장 (너무 작으면 컨텍스트 부족)
-        min_size = 256
-        if x2 - x1 < min_size:
-            center_x = (x1 + x2) // 2
-            x1 = max(0, center_x - min_size // 2)
-            x2 = min(w, x1 + min_size)
-        if y2 - y1 < min_size:
-            center_y = (y1 + y2) // 2
-            y1 = max(0, center_y - min_size // 2)
-            y2 = min(h, y1 + min_size)
-
-        return (x1, y1, x2, y2)
 
     def _preprocess(self, image: np.ndarray, mask: np.ndarray) -> Tuple[np.ndarray, np.ndarray, Tuple]:
         """전처리: 리사이즈, 패딩, 정규화"""
@@ -130,14 +75,13 @@ class LamaInpainter:
         return img_input, mask_input, (top, left, new_h, new_w)
 
     def _postprocess(self, output: np.ndarray, orig_h: int, orig_w: int, pad_info: Tuple) -> np.ndarray:
-        """후처리: 패딩 제거, 리사이즈 (LaMa는 완성된 이미지를 출력)"""
+        """후처리: 패딩 제거, 리사이즈"""
         top, left, new_h, new_w = pad_info
 
         # NCHW -> HWC
         result = output[0].transpose(1, 2, 0)
 
-        # ONNX 모델은 0-255 범위로 출력 (PyTorch와 다름)
-        # 안전하게 클리핑
+        # ONNX 모델은 0-255 범위로 출력
         result = np.clip(result, 0, 255).astype(np.uint8)
 
         # 패딩 제거 및 원본 크기로
