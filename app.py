@@ -42,7 +42,7 @@ class ObjectEraser:
         self.rois: List[Tuple[int, int, int, int]] = []
         self.detector: Optional[YOLODetector] = None
         self.lama: Optional[LamaInpainter] = None
-        self.window_name = "Object Eraser (d:탐지 r:ROI e:제거 t/c/l:모드 s:저장 q:종료)"
+        self.window_name = "Object Eraser"
 
     def run(self) -> None:
         """메인 루프"""
@@ -99,7 +99,7 @@ class ObjectEraser:
         thick = 3
 
         # 현재 모드 (아주 크게)
-        mode_text = {"telea": "Telea (직접구현)", "telea_cv": "cv2.inpaint()", "lama": "LaMa (딥러닝)"}
+        mode_text = {"telea": "Telea", "telea_cv": "cv2.inpaint", "lama": "LaMa"}
         cv2.putText(combined, f"[Mode] {mode_text.get(self.mode, self.mode)}",
                     (panel_x, 80), font, 5.0, (0, 255, 0), 8)
 

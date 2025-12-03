@@ -16,6 +16,13 @@ build/
 # YOLO weights (large files)
 *.weights
 
+# LaMa model (large files)
+models/lama/*.onnx
+
+# Test images
+image.jpeg
+image2.jpeg
+
 # macOS
 .DS_Store
 .AppleDouble
