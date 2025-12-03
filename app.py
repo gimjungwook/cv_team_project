@@ -49,7 +49,7 @@ class ObjectEraser:
             self._show_image()
             key = cv2.waitKey(0) & 0xFF
 
-            if key == ord('q'):
+            if key == ord('q') or key == 27:  # q or ESC
                 break
             elif key == ord('d'):
                 self._detect()
@@ -94,14 +94,14 @@ class ObjectEraser:
         font_scale = 1.2
         thick = 3
 
-        # 현재 모드 (크게)
+        # 현재 모드 (아주 크게)
         mode_text = {"telea": "Telea (직접구현)", "telea_cv": "cv2.inpaint()", "lama": "LaMa (딥러닝)"}
         cv2.putText(combined, f"[Mode] {mode_text.get(self.mode, self.mode)}",
-                    (panel_x, 50), font, 1.5, (0, 255, 0), 3)
+                    (panel_x, 80), font, 5.0, (0, 255, 0), 8)
 
         # 탐지/ROI 개수
         cv2.putText(combined, f"Detections: {len(self.detections)} | ROIs: {len(self.rois)}",
-                    (panel_x, 110), font, 1.2, (0, 255, 255), 3)
+                    (panel_x, 160), font, 1.5, (0, 255, 255), 3)
 
         # 조작법 안내
         controls = [
@@ -116,10 +116,10 @@ class ObjectEraser:
             ("=== Other ===", (255, 255, 255)),
             ("s: Save", (200, 200, 200)),
             ("z: Reset", (200, 200, 200)),
-            ("q: Quit", (200, 200, 200)),
+            ("q/ESC: Quit", (200, 200, 200)),
         ]
 
-        y = 180
+        y = 230
         for text, color in controls:
             cv2.putText(combined, text, (panel_x, y), font, font_scale, color, thick)
             y += line_h

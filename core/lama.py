@@ -67,8 +67,10 @@ class LamaInpainter:
         img_input = cv2.cvtColor(img_padded, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         img_input = np.transpose(img_input, (2, 0, 1))[np.newaxis, ...]
 
-        # 마스크 정규화, N1HW
+        # 마스크 정규화, N1HW (1 = 인페인팅할 영역)
         mask_input = (mask_padded.astype(np.float32) / 255.0)[np.newaxis, np.newaxis, ...]
+        # 마스크 이진화 (0 또는 1로 명확하게)
+        mask_input = (mask_input > 0.5).astype(np.float32)
 
         return img_input, mask_input, (top, left, new_h, new_w)
 
@@ -78,9 +80,14 @@ class LamaInpainter:
         top, left, new_h, new_w = pad_info
         orig_h, orig_w = orig_size
 
-        # NCHW -> HWC, [0,1] -> [0,255]
+        # NCHW -> HWC
         result = output[0].transpose(1, 2, 0)
-        result = np.clip(result * 255, 0, 255).astype(np.uint8)
+
+        # 출력 범위 자동 감지: [0,1] 범위면 255 곱하기, 이미 [0,255] 범위면 그대로
+        if result.max() <= 1.0:
+            result = np.clip(result * 255, 0, 255).astype(np.uint8)
+        else:
+            result = np.clip(result, 0, 255).astype(np.uint8)
 
         # 패딩 제거 및 원본 크기로
         result = result[top:top + new_h, left:left + new_w]
@@ -90,8 +97,10 @@ class LamaInpainter:
         result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
 
         # 마스크 영역만 블렌딩
-        blend = (mask.astype(np.float32) / 255.0)[:, :, np.newaxis]
+        blend = mask.astype(np.float32) / 255.0
         blend = cv2.GaussianBlur(blend, (5, 5), 0)
+        blend = np.clip(blend, 0, 1)
+        blend = blend[:, :, np.newaxis]  # (H, W) -> (H, W, 1)
         output_img = orig_image * (1 - blend) + result * blend
 
         return output_img.astype(np.uint8)
