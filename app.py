@@ -80,6 +80,21 @@ class ObjectEraser:
 
         cv2.destroyAllWindows()
 
+    def _get_font_scale(self, base_scale: float = 1.0) -> float:
+        """이미지 해상도에 따른 폰트 스케일 계산 (1080p 기준)"""
+        h, w = self.original.shape[:2]
+        # 1080p (1920x1080)를 기준으로 스케일 계산
+        reference_height = 1080
+        scale_factor = h / reference_height
+        return base_scale * scale_factor
+
+    def _get_thickness(self, base_thick: int = 2) -> int:
+        """이미지 해상도에 따른 선 두께 계산"""
+        h, w = self.original.shape[:2]
+        reference_height = 1080
+        scale_factor = h / reference_height
+        return max(1, int(base_thick * scale_factor))
+
     def _show_image(self) -> None:
         """Before | After 나란히 표시 + 조작법"""
         h, w = self.original.shape[:2]
@@ -91,21 +106,27 @@ class ObjectEraser:
         # 나란히 배치
         combined = np.hstack([display_original, self.result])
 
-        # 조작법 패널 (오른쪽 상단)
-        panel_x = w + 30
-        line_h = 55
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 1.2
-        thick = 3
+        # 해상도에 따른 스케일 계산
+        scale = h / 1080  # 1080p 기준
 
-        # 현재 모드 (아주 크게)
+        # 조작법 패널 (오른쪽 상단)
+        panel_x = w + int(15 * scale)
+        line_h = int(28 * scale)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = self._get_font_scale(0.6)
+        thick = self._get_thickness(2)
+
+        # 현재 모드
         mode_text = {"telea": "Telea", "telea_cv": "cv2.inpaint", "lama": "LaMa"}
+        mode_font_scale = self._get_font_scale(2.0)
+        mode_thick = self._get_thickness(4)
         cv2.putText(combined, f"[Mode] {mode_text.get(self.mode, self.mode)}",
-                    (panel_x, 80), font, 5.0, (0, 255, 0), 8)
+                    (panel_x, int(40 * scale)), font, mode_font_scale, (0, 255, 0), mode_thick)
 
         # 탐지/ROI 개수
+        info_font_scale = self._get_font_scale(0.7)
         cv2.putText(combined, f"Detections: {len(self.detections)} | ROIs: {len(self.rois)}",
-                    (panel_x, 160), font, 1.5, (0, 255, 255), 3)
+                    (panel_x, int(80 * scale)), font, info_font_scale, (0, 255, 255), thick)
 
         # 조작법 안내
         controls = [
@@ -123,35 +144,42 @@ class ObjectEraser:
             ("q/ESC: Quit", (200, 200, 200)),
         ]
 
-        y = 230
+        y = int(115 * scale)
         for text, color in controls:
             cv2.putText(combined, text, (panel_x, y), font, font_scale, color, thick)
             y += line_h
 
         # 라벨 (하단)
-        cv2.putText(combined, "[ Original ]", (w // 2 - 100, h - 30),
-                    font, 1.3, (255, 255, 255), 3)
-        cv2.putText(combined, "[ Result ]", (w + w // 2 - 80, h - 30),
-                    font, 1.3, (255, 255, 255), 3)
+        label_font_scale = self._get_font_scale(0.7)
+        label_offset = int(50 * scale)
+        label_y = h - int(15 * scale)
+        cv2.putText(combined, "[ Original ]", (w // 2 - label_offset, label_y),
+                    font, label_font_scale, (255, 255, 255), thick)
+        cv2.putText(combined, "[ Result ]", (w + w // 2 - label_offset, label_y),
+                    font, label_font_scale, (255, 255, 255), thick)
 
         cv2.imshow(self.window_name, combined)
 
     def _draw_overlays(self, image: np.ndarray) -> None:
         """탐지 결과와 ROI 박스 그리기"""
+        font_scale = self._get_font_scale(0.35)
+        thick = self._get_thickness(1)
+        label_offset = max(3, int(5 * (self.original.shape[0] / 1080)))
+
         # 탐지 결과
         for det in self.detections:
             x, y, w, h = det.bbox
-            cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), thick)
             label = f"{det.label} {det.confidence * 100:.0f}%"
-            cv2.putText(image, label, (x, y - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            cv2.putText(image, label, (x, y - label_offset),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 255, 0), thick)
 
         # 수동 ROI
         for i, roi in enumerate(self.rois):
             x, y, w, h = roi
-            cv2.rectangle(image, (x, y), (x + w, y + h), (0, 165, 255), 2)
-            cv2.putText(image, f"ROI {i + 1}", (x, y - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2)
+            cv2.rectangle(image, (x, y), (x + w, y + h), (0, 165, 255), thick)
+            cv2.putText(image, f"ROI {i + 1}", (x, y - label_offset),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 165, 255), thick)
 
     def _detect(self) -> None:
         """YOLO 탐지"""
