@@ -22,7 +22,7 @@ import numpy as np
 
 from core.detect import load_default_detector, YOLODetector, DetectionResult
 from core.lama import load_lama_model, LamaInpainter
-from core.inpaint import telea_inpaint
+from core.inpaint import telea_inpaint, class_inpaint
 
 
 class ObjectEraser:
@@ -66,7 +66,7 @@ class ObjectEraser:
                 print("모드 변경: Telea 직접 구현 → 'e' 키로 제거 실행")
             elif key == ord('c'):
                 self.mode = "telea_cv"
-                print("모드 변경: cv2.inpaint() → 'e' 키로 제거 실행")
+                print("모드 변경: 수업 기법 (erode+가중치평균+GaussianBlur) → 'e' 키로 제거 실행")
             elif key == ord('l'):
                 self.mode = "lama"
                 print("모드 변경: LaMa → 'e' 키로 제거 실행")
@@ -117,7 +117,7 @@ class ObjectEraser:
         thick = self._get_thickness(2)
 
         # 현재 모드
-        mode_text = {"telea": "Telea", "telea_cv": "cv2.inpaint", "lama": "LaMa"}
+        mode_text = {"telea": "Telea", "telea_cv": "Class", "lama": "LaMa"}
         mode_font_scale = self._get_font_scale(2.0)
         mode_thick = self._get_thickness(4)
         cv2.putText(combined, f"[Mode] {mode_text.get(self.mode, self.mode)}",
@@ -136,7 +136,7 @@ class ObjectEraser:
             ("e: ERASE!", (100, 100, 255)),
             ("=== Mode ===", (255, 255, 255)),
             ("t: Telea", (200, 200, 100)),
-            ("c: cv2.inpaint", (200, 200, 100)),
+            ("c: Class", (200, 200, 100)),
             ("l: LaMa", (200, 200, 100)),
             ("=== Other ===", (255, 255, 255)),
             ("s: Save", (200, 200, 200)),
@@ -266,8 +266,8 @@ class ObjectEraser:
                 print("Telea 인페인팅 처리 중 (직접 구현)...")
                 self.result = telea_inpaint(self.result, mask, inpaint_radius=5)
             elif self.mode == "telea_cv":
-                print("cv2.inpaint() 처리 중...")
-                self.result = cv2.inpaint(self.result, mask, 5, cv2.INPAINT_TELEA)
+                print("수업 기법 인페인팅 처리 중 (erode + 가중치 평균 + GaussianBlur)...")
+                self.result = class_inpaint(self.result, mask, radius=5)
             elif self.mode == "lama":
                 if self.lama is None:
                     print("LaMa 모델 로딩 중...")
@@ -309,7 +309,7 @@ def main():
     print("r: ROI 수동 추가")
     print("e: 선택 영역 제거")
     print("t: Telea 직접 구현 모드")
-    print("c: cv2.inpaint() 모드")
+    print("c: 수업 기법 모드 (erode+가중치평균)")
     print("l: LaMa 모드")
     print("s: 결과 저장")
     print("z: 원본 복원")

@@ -354,3 +354,111 @@ def cv_inpaint(
     """
     import cv2
     return cv2.inpaint(image, mask, inpaint_radius, cv2.INPAINT_TELEA)
+
+
+def class_inpaint(
+    image: np.ndarray,
+    mask: np.ndarray,
+    radius: int = 5
+) -> np.ndarray:
+    """
+    수업에서 배운 기법들만 사용한 인페인팅 (반복적 경계 확산)
+
+    알고리즘:
+        1. erode()로 마스크 경계를 1픽셀씩 찾음
+        2. 경계 픽셀을 주변 알려진 픽셀들의 거리 기반 가중치 평균으로 채움
+        3. 마스크가 완전히 채워질 때까지 반복
+        4. GaussianBlur()로 경계 스무딩
+
+    사용 기법:
+        - erode(): 경계 찾기 (morphological operation)
+        - subtract(): 경계 마스크 계산
+        - GaussianBlur(): 후처리 스무딩
+        - 픽셀 접근 (numpy 인덱싱): 가중치 평균 계산
+
+    Args:
+        image: BGR 형식의 원본 이미지
+        mask: 제거할 영역의 마스크 (0이 아닌 값 = 제거할 영역)
+        radius: 인페인팅에 사용할 이웃 픽셀 반경
+
+    Returns:
+        인페인팅된 이미지
+    """
+    import cv2
+
+    h, w = image.shape[:2]
+    result = image.copy().astype(np.float32)
+
+    # 마스크 이진화
+    remaining = (mask > 0).astype(np.uint8) * 255
+
+    # erode용 커널 (3x3)
+    kernel = np.ones((3, 3), np.uint8)
+
+    # 반복: 경계에서 안쪽으로 채워나감
+    iteration = 0
+    max_iterations = max(h, w)  # 무한 루프 방지
+
+    while np.any(remaining > 0) and iteration < max_iterations:
+        iteration += 1
+
+        # 1. 경계 찾기: erode + subtract
+        eroded = cv2.erode(remaining, kernel, iterations=1)
+        boundary = cv2.subtract(remaining, eroded)
+
+        if not np.any(boundary > 0):
+            break
+
+        # 2. 경계 픽셀 찾기
+        boundary_points = np.where(boundary > 0)
+
+        # 3. 경계 픽셀 채우기 (가중치 평균)
+        for y, x in zip(boundary_points[0], boundary_points[1]):
+            total_weight = 0.0
+            weighted_sum = np.zeros(3, dtype=np.float32)
+
+            # 주변 radius x radius 영역 탐색
+            for dy in range(-radius, radius + 1):
+                for dx in range(-radius, radius + 1):
+                    ny, nx = y + dy, x + dx
+
+                    # 경계 체크
+                    if not (0 <= ny < h and 0 <= nx < w):
+                        continue
+
+                    # 알려진 픽셀만 (remaining이 0인 픽셀)
+                    if remaining[ny, nx] == 0:
+                        dist = np.sqrt(dy ** 2 + dx ** 2)
+                        if dist > 0:
+                            # 거리 기반 가중치 (가까울수록 높음)
+                            weight = 1.0 / (dist ** 2 + 0.001)
+                            total_weight += weight
+                            weighted_sum += weight * result[ny, nx]
+
+            # 가중 평균 적용
+            if total_weight > 0:
+                result[y, x] = weighted_sum / total_weight
+
+        # 4. 마스크 업데이트: 경계가 채워졌으니 eroded로 대체
+        remaining = eroded
+
+    # 5. 결과 클리핑
+    result = np.clip(result, 0, 255).astype(np.uint8)
+
+    # 6. 후처리: GaussianBlur로 경계 스무딩
+    blurred = cv2.GaussianBlur(result, (5, 5), 0)
+
+    # 마스크 경계 영역만 블렌딩 (경계가 부드럽게)
+    mask_float = mask.astype(np.float32) / 255.0
+    mask_blur = cv2.GaussianBlur(mask_float, (15, 15), 0)
+
+    # 3채널로 확장
+    if len(mask_blur.shape) == 2:
+        mask_blur = mask_blur[:, :, np.newaxis]
+
+    # 원본과 블러 블렌딩 (마스크 영역에서만 약간의 스무딩)
+    blend_factor = 0.3
+    result = (result * (1 - mask_blur * blend_factor) +
+              blurred * mask_blur * blend_factor).astype(np.uint8)
+
+    return result
